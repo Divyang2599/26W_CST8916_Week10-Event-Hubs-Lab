@@ -125,7 +125,7 @@
     .feed-ts    { color: #484f58; flex-shrink: 0; width: 90px; }
     .feed-type  { flex-shrink: 0; width: 110px; }
     .feed-page  { color: #8b949e; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .feed-user  { color: #484f58; flex-shrink: 0; width: 60px; }
+    .feed-device { color: #58a6ff; flex-shrink: 0; width: 70px; font-size: 0.75rem; }
 
     /* event type colours */
     .t-page_view    { color: #58a6ff; }
@@ -134,6 +134,56 @@
     .t-purchase     { color: #f85149; }
     .t-banner_click { color: #bc8cff; }
     .t-unknown      { color: #8b949e; }
+
+    /* ── Stream Analytics Panel ─────────────────────────────── */
+    .analytics-panel {
+      background: #161b22;
+      border: 1px solid #1f6feb;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 0 24px 24px;
+    }
+    .analytics-panel h3 {
+      font-size: 0.85rem;
+      color: #58a6ff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 16px;
+    }
+    .analytics-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+    }
+    .analytics-section {
+      flex: 1;
+      min-width: 260px;
+    }
+    .analytics-section .section-label {
+      font-size: 0.75rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    /* Spike box */
+    .spike-box {
+      background: #1c2128;
+      border: 2px solid #30363d;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+      transition: border-color 0.4s;
+    }
+    .spike-level {
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: #8b949e;
+      transition: color 0.4s;
+    }
+    .spike-count  { font-size: 0.85rem; color: #8b949e; margin-top: 8px; }
+    .spike-window { font-size: 0.75rem; color: #484f58; margin-top: 4px; }
 
     /* ── Footer ─────────────────────────────────────────────── */
     footer {
@@ -152,9 +202,7 @@
   <h1>ShopStream – Live Analytics</h1>
   <div style="display:flex; align-items:center; gap:16px;">
     <div class="live-badge"><div class="dot"></div> LIVE</div>
-    <nav>
-      <a href="/">← Back to Store</a>
-    </nav>
+    <nav><a href="/">← Back to Store</a></nav>
   </div>
 </header>
 
@@ -178,10 +226,36 @@
   </div>
 </div>
 
+<!-- ── Stream Analytics Panel ─────────────────────────────────── -->
+<div class="analytics-panel">
+  <h3>⚡ Azure Stream Analytics Results — 30-second Tumbling Windows</h3>
+  <div class="analytics-grid">
+
+    <!-- Device Type Breakdown -->
+    <div class="analytics-section">
+      <div class="section-label">Device Type Breakdown</div>
+      <div id="device-chart">
+        <p style="color:#484f58;font-size:0.85rem;">Waiting for Stream Analytics window (30s)...</p>
+      </div>
+    </div>
+
+    <!-- Traffic Spike Detection -->
+    <div class="analytics-section">
+      <div class="section-label">Traffic Spike Detection</div>
+      <div class="spike-box" id="spike-box">
+        <div class="spike-level" id="spike-level">–</div>
+        <div class="spike-count" id="spike-count">Waiting for first window...</div>
+        <div class="spike-window" id="spike-window"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ── Panels ─────────────────────────────────────────────────── -->
 <div class="panels">
 
-  <!-- Event type breakdown -->
+  <!-- Event type breakdown bar chart -->
   <div class="panel" style="max-width:400px;">
     <h3>Events by Type</h3>
     <div id="bar-chart">
@@ -200,16 +274,15 @@
 </div>
 
 <footer>
-  Polling <code>/api/events</code> every 2 seconds &nbsp;|&nbsp;
-  Events consumed from Azure Event Hubs &nbsp;|&nbsp;
-  CST8916 Week 10 Lab
+  Polling <code>/api/events</code> every 2 s &nbsp;|&nbsp;
+  Stream Analytics results via <code>/api/analytics</code> every 10 s &nbsp;|&nbsp;
+  CST8916 Assignment 2
 </footer>
 
 <script>
-  // Poll /api/events every 2 seconds and refresh the UI
-  const POLL_INTERVAL_MS = 2000;
+  const POLL_INTERVAL_MS      = 2000;
+  const ANALYTICS_INTERVAL_MS = 10000;
 
-  // Colour map for event types
   const TYPE_CLASS = {
     page_view:     "t-page_view",
     product_click: "t-product_click",
@@ -218,6 +291,7 @@
     banner_click:  "t-banner_click",
   };
 
+  // ── Raw events polling ────────────────────────────────────────
   function fetchAndRender() {
     fetch("/api/events?limit=50")
       .then(res => res.json())
@@ -229,7 +303,18 @@
       .catch(err => console.error("Poll error:", err));
   }
 
-  // ── KPI cards ────────────────────────────────────────────────
+  // ── Stream Analytics polling ──────────────────────────────────
+  function fetchAnalytics() {
+    fetch("/api/analytics")
+      .then(res => res.json())
+      .then(data => {
+        renderDeviceChart(data.device_breakdown);
+        renderSpikeBox(data.spike_detection);
+      })
+      .catch(err => console.error("Analytics poll error:", err));
+  }
+
+  // ── KPI cards ─────────────────────────────────────────────────
   function renderKPIs(data) {
     document.getElementById("kpi-total").textContent    = data.total ?? 0;
     document.getElementById("kpi-views").textContent    = data.summary?.page_view    ?? 0;
@@ -237,17 +322,13 @@
     document.getElementById("kpi-purchase").textContent = data.summary?.purchase     ?? 0;
   }
 
-  // ── Bar chart ─────────────────────────────────────────────────
+  // ── Event type bar chart ───────────────────────────────────────
   function renderBarChart(summary) {
     const container = document.getElementById("bar-chart");
     if (!summary || Object.keys(summary).length === 0) return;
-
     const maxVal = Math.max(...Object.values(summary), 1);
     container.innerHTML = "";
-
-    // Sort by count descending
-    const sorted = Object.entries(summary).sort((a, b) => b[1] - a[1]);
-    sorted.forEach(([type, count]) => {
+    Object.entries(summary).sort((a,b) => b[1]-a[1]).forEach(([type, count]) => {
       const pct = (count / maxVal * 100).toFixed(1);
       const row = document.createElement("div");
       row.className = "bar-row";
@@ -260,32 +341,77 @@
     });
   }
 
-  // ── Live feed ─────────────────────────────────────────────────
+  // ── Live feed ──────────────────────────────────────────────────
   function renderFeed(events) {
     const feed = document.getElementById("feed");
     if (!events || events.length === 0) return;
-
     feed.innerHTML = "";
-    // Show newest first
     [...events].reverse().forEach(e => {
-      const ts   = e.timestamp ? e.timestamp.slice(11, 19) : "–";
-      const type = e.event_type || "unknown";
-      const cls  = TYPE_CLASS[type] || "t-unknown";
-      const row  = document.createElement("div");
+      const ts     = e.timestamp ? e.timestamp.slice(11,19) : "–";
+      const type   = e.event_type || "unknown";
+      const cls    = TYPE_CLASS[type] || "t-unknown";
+      const device = e.deviceType || "–";
+      const row    = document.createElement("div");
       row.className = "feed-row";
       row.innerHTML = `
         <span class="feed-ts">${ts}</span>
         <span class="feed-type ${cls}">${type}</span>
         <span class="feed-page">${e.page || "–"}</span>
-        <span class="feed-user">${(e.user_id || "–").slice(0, 8)}</span>
+        <span class="feed-device">${device}</span>
       `;
       feed.appendChild(row);
     });
   }
 
-  // Kick off polling immediately, then repeat
+  // ── Device breakdown (Stream Analytics) ───────────────────────
+  function renderDeviceChart(breakdown) {
+    const container = document.getElementById("device-chart");
+    if (!breakdown || Object.keys(breakdown).length === 0) return;
+    const maxVal = Math.max(...Object.values(breakdown), 1);
+    container.innerHTML = "";
+    const colors = { desktop: "#58a6ff", mobile: "#3fb950", tablet: "#e3b341", unknown: "#8b949e" };
+    Object.entries(breakdown).sort((a,b) => b[1]-a[1]).forEach(([device, count]) => {
+      const pct   = (count / maxVal * 100).toFixed(1);
+      const color = colors[device] || "#8b949e";
+      const row   = document.createElement("div");
+      row.className = "bar-row";
+      row.innerHTML = `
+        <div class="bar-label" style="color:${color}">${device}</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <div class="bar-count">${count}</div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  // ── Spike detection (Stream Analytics) ────────────────────────
+  function renderSpikeBox(spike) {
+    if (!spike) return;
+    const level  = spike.traffic_level || "normal";
+    const colors = { normal: "#3fb950", elevated: "#e3b341", spike: "#f85149" };
+    const color  = colors[level] || "#8b949e";
+    const box    = document.getElementById("spike-box");
+    const lvlEl  = document.getElementById("spike-level");
+    const cntEl  = document.getElementById("spike-count");
+    const winEl  = document.getElementById("spike-window");
+    lvlEl.textContent   = level.toUpperCase();
+    lvlEl.style.color   = color;
+    box.style.borderColor = color;
+    cntEl.textContent   = spike.total_events
+      ? `${spike.total_events} events in last 30s window`
+      : "Waiting for first window...";
+    winEl.textContent   = spike.window_end
+      ? `Window ended: ${spike.window_end.slice(11,19)} UTC`
+      : "";
+  }
+
+  // ── Start polling ──────────────────────────────────────────────
   fetchAndRender();
-  setInterval(fetchAndRender, POLL_INTERVAL_MS);
+  fetchAnalytics();
+  setInterval(fetchAndRender,  POLL_INTERVAL_MS);
+  setInterval(fetchAnalytics,  ANALYTICS_INTERVAL_MS);
 </script>
 </body>
 </html>

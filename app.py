@@ -1,81 +1,83 @@
-# CST8916 – Week 10 Lab: Clickstream Analytics with Azure Event Hubs
+
+# CST8916 – Week 10 Lab + Assignment 2: Clickstream Analytics with Azure Event Hubs
 #
-# This Flask app has two roles:
-#   1. PRODUCER  – receives click events from the browser and sends them to Azure Event Hubs
-#   2. CONSUMER  – reads the last N events from Event Hubs and serves a live dashboard
+# PRODUCER  – receives click events from browser and sends them to Azure Event Hubs
+# CONSUMER  – reads raw events from Event Hubs (clickstream hub)
+# ANALYTICS – reads Stream Analytics output from Event Hubs (analytics-output hub)
 #
 # Routes:
 #   GET  /              → serves the demo e-commerce store (client.html)
 #   POST /track         → receives a click event and publishes it to Event Hubs
 #   GET  /dashboard     → serves the live analytics dashboard (dashboard.html)
-#   GET  /api/events    → returns recent events as JSON (polled by the dashboard)
+#   GET  /api/events    → returns recent raw events as JSON
+#   GET  /api/analytics → returns Stream Analytics results as JSON
 
 import os
 import json
 import threading
 from datetime import datetime, timezone
+from collections import defaultdict
 
 from flask import Flask, jsonify, request, send_from_directory, abort
 from flask_cors import CORS
 
-# ---------------------------------------------------------------------------
-# Azure Event Hubs SDK
-# EventHubProducerClient  – sends events to Event Hubs
-# EventHubConsumerClient  – reads events from Event Hubs
-# EventData               – wraps a single event payload
-# ---------------------------------------------------------------------------
 from azure.eventhub import EventHubProducerClient, EventHubConsumerClient, EventData
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Configuration – read from environment variables so secrets never live in code
-#
-# Set these before running locally:
-#   export EVENT_HUB_CONNECTION_STR="Endpoint=sb://..."
-#   export EVENT_HUB_NAME="clickstream"
-#
-# On Azure App Service, set them as Application Settings in the portal.
+# Configuration – read from environment variables
 # ---------------------------------------------------------------------------
-CONNECTION_STR = os.environ.get("EVENT_HUB_CONNECTION_STR", "")
-EVENT_HUB_NAME = os.environ.get("EVENT_HUB_NAME", "clickstream")
+CONNECTION_STR    = os.environ.get("EVENT_HUB_CONNECTION_STR", "")
+EVENT_HUB_NAME    = os.environ.get("EVENT_HUB_NAME", "clickstream")
+ANALYTICS_HUB_NAME = os.environ.get("ANALYTICS_HUB_NAME", "analytics-output")
 
-# In-memory buffer: stores the last 50 events received by the consumer thread.
-# In a production system you would query a database or Azure Stream Analytics output.
+# ---------------------------------------------------------------------------
+# Raw event buffer – stores last 50 click events
+# ---------------------------------------------------------------------------
 _event_buffer = []
-_buffer_lock = threading.Lock()
-MAX_BUFFER = 50
+_buffer_lock  = threading.Lock()
+MAX_BUFFER    = 50
+
+# ---------------------------------------------------------------------------
+# Analytics buffer – stores Stream Analytics output
+# Device breakdown computed locally as fallback + from Stream Analytics
+# ---------------------------------------------------------------------------
+_analytics_buffer = {
+    "device_breakdown": {},
+    "spike_detection": {
+        "traffic_level": "normal",
+        "total_events":  0,
+        "window_end":    ""
+    }
+}
+_analytics_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
 # Helper – send a single event dict to Azure Event Hubs
 # ---------------------------------------------------------------------------
 def send_to_event_hubs(event_dict: dict):
-    """Serialize event_dict to JSON and publish it to Event Hubs."""
     if not CONNECTION_STR:
-        # Gracefully skip if the connection string is not configured yet
-        app.logger.warning("EVENT_HUB_CONNECTION_STR is not set – skipping Event Hubs publish")
+        app.logger.warning("EVENT_HUB_CONNECTION_STR not set – skipping publish")
         return
 
-    # EventHubProducerClient is created fresh per request here for simplicity.
-    # In a high-throughput production app you would keep a shared client instance.
     producer = EventHubProducerClient.from_connection_string(
         conn_str=CONNECTION_STR,
         eventhub_name=EVENT_HUB_NAME,
     )
     with producer:
-        # create_batch() lets the SDK manage event size limits automatically
         event_batch = producer.create_batch()
         event_batch.add(EventData(json.dumps(event_dict)))
         producer.send_batch(event_batch)
 
 
 # ---------------------------------------------------------------------------
-# Background consumer thread – reads events from Event Hubs and buffers them
+# Raw event consumer callback
 # ---------------------------------------------------------------------------
 def _on_event(partition_context, event):
-    """Callback invoked by the consumer client for each incoming event."""
+    """Called for each raw click event from the clickstream hub."""
     body = event.body_as_str(encoding="UTF-8")
     try:
         data = json.loads(body)
@@ -84,28 +86,55 @@ def _on_event(partition_context, event):
 
     with _buffer_lock:
         _event_buffer.append(data)
-        # Keep the buffer at MAX_BUFFER entries (drop the oldest)
         if len(_event_buffer) > MAX_BUFFER:
             _event_buffer.pop(0)
 
-    # Acknowledge the event so Event Hubs advances the consumer offset
+        # Update device breakdown locally from raw events as fallback
+        # This ensures device breakdown works even before Stream Analytics window closes
+        device = data.get("deviceType", "unknown")
+        with _analytics_lock:
+            _analytics_buffer["device_breakdown"][device] = \
+                _analytics_buffer["device_breakdown"].get(device, 0) + 1
+
     partition_context.update_checkpoint(event)
 
 
-def start_consumer():
-    """Start the Event Hubs consumer in a background daemon thread.
-
-    The consumer must run on a separate thread because consumer.receive() blocks
-    forever waiting for events. Running it on the main thread would freeze Flask
-    and make the web server unable to handle any HTTP requests.
-    """
-    if not CONNECTION_STR:
-        app.logger.warning("EVENT_HUB_CONNECTION_STR is not set – consumer thread not started")
+# ---------------------------------------------------------------------------
+# Stream Analytics output consumer callback
+# ---------------------------------------------------------------------------
+def _on_analytics_event(partition_context, event):
+    """Called for each Stream Analytics result from the analytics-output hub."""
+    body = event.body_as_str(encoding="UTF-8")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
         return
 
-    # $Default is the built-in consumer group every Event Hub has.
-    # A consumer group is a logical "view" of the stream — multiple groups can
-    # read the same events independently (e.g. one for analytics, one for alerts).
+    query_type = data.get("query_type")
+
+    with _analytics_lock:
+        if query_type == "device_breakdown":
+            device = data.get("deviceType", "unknown")
+            _analytics_buffer["device_breakdown"][device] = data.get("event_count", 0)
+
+        elif query_type == "spike_detection":
+            _analytics_buffer["spike_detection"] = {
+                "traffic_level": data.get("traffic_level", "normal"),
+                "total_events":  data.get("total_events", 0),
+                "window_end":    data.get("window_end", "")
+            }
+
+    partition_context.update_checkpoint(event)
+
+
+# ---------------------------------------------------------------------------
+# Start raw event consumer thread
+# ---------------------------------------------------------------------------
+def start_consumer():
+    if not CONNECTION_STR:
+        app.logger.warning("EVENT_HUB_CONNECTION_STR not set – consumer not started")
+        return
+
     consumer = EventHubConsumerClient.from_connection_string(
         conn_str=CONNECTION_STR,
         consumer_group="$Default",
@@ -114,20 +143,47 @@ def start_consumer():
 
     def run():
         with consumer:
-            # receive() blocks forever, calling _on_event for each new event.
-            # starting_position="-1" means "start from the beginning of the stream",
-            # not just events that arrive after this consumer connects.
             consumer.receive(
                 on_event=_on_event,
                 starting_position="-1",
             )
 
-    # daemon=True means this thread is automatically killed when the main program
-    # exits. Without it, Flask would hang on shutdown waiting for receive() to
-    # return — which it never would.
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    app.logger.info("Event Hubs consumer thread started")
+    app.logger.info("Raw event consumer thread started")
+
+
+# ---------------------------------------------------------------------------
+# Start Stream Analytics output consumer thread
+# ---------------------------------------------------------------------------
+def start_analytics_consumer():
+    if not CONNECTION_STR:
+        app.logger.warning("EVENT_HUB_CONNECTION_STR not set – analytics consumer not started")
+        return
+
+    consumer = EventHubConsumerClient.from_connection_string(
+        conn_str=CONNECTION_STR,
+        consumer_group="$Default",
+        eventhub_name=ANALYTICS_HUB_NAME,
+    )
+
+    def run():
+        with consumer:
+            consumer.receive(
+                on_event=_on_analytics_event,
+                starting_position="-1",
+            )
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    app.logger.info("Analytics consumer thread started")
+
+
+# ---------------------------------------------------------------------------
+# Start both consumers immediately (works under both Gunicorn and python app.py)
+# ---------------------------------------------------------------------------
+start_consumer()
+start_analytics_consumer()
 
 
 # ---------------------------------------------------------------------------
@@ -136,50 +192,40 @@ def start_consumer():
 
 @app.route("/")
 def index():
-    """Serve the demo e-commerce store."""
     return send_from_directory("templates", "client.html")
 
 
 @app.route("/dashboard")
 def dashboard():
-    """Serve the live analytics dashboard."""
     return send_from_directory("templates", "dashboard.html")
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check – used by Azure App Service to verify the app is running."""
     return jsonify({"status": "healthy"}), 200
 
 
 @app.route("/track", methods=["POST"])
 def track():
-    """
-    Receive a click event from the browser and publish it to Event Hubs.
-
-    Expected JSON body:
-    {
-        "event_type": "page_view" | "product_click" | "add_to_cart" | "purchase",
-        "page":       "/products/shoes",
-        "product_id": "p_shoe_42",       (optional)
-        "user_id":    "u_1234"
-    }
-    """
+    """Receive enriched click event from browser and publish to Event Hubs."""
     if not request.json:
         abort(400)
 
-    # Enrich the event with a server-side timestamp
     event = {
         "event_type": request.json.get("event_type", "unknown"),
         "page":       request.json.get("page", "/"),
         "product_id": request.json.get("product_id"),
         "user_id":    request.json.get("user_id", "anonymous"),
+        "session_id": request.json.get("session_id", ""),
+        "deviceType": request.json.get("deviceType", "unknown"),
+        "browser":    request.json.get("browser", "unknown"),
+        "os":         request.json.get("os", "unknown"),
         "timestamp":  datetime.now(timezone.utc).isoformat(),
     }
 
     send_to_event_hubs(event)
 
-    # Also buffer locally so the dashboard works even without a consumer thread
+    # Also buffer locally so dashboard works immediately
     with _buffer_lock:
         _event_buffer.append(event)
         if len(_event_buffer) > MAX_BUFFER:
@@ -190,26 +236,15 @@ def track():
 
 @app.route("/api/events", methods=["GET"])
 def get_events():
-    """
-    Return the buffered events as JSON.
-    The dashboard polls this endpoint every 2 seconds.
-
-    Optional query param:  ?limit=20  (default 20, max 50)
-    """
+    """Return recent raw events as JSON. Polled by dashboard every 2 seconds."""
     try:
-        # request.args.get("limit", 20) reads ?limit=N from the URL, defaulting to 20.
-        # int() converts it from a string (all URL params are strings) to an integer.
-        # min(..., MAX_BUFFER) clamps the value so callers can never request more
-        # events than the buffer holds — e.g. ?limit=999 silently becomes 50.
         limit = min(int(request.args.get("limit", 20)), MAX_BUFFER)
     except ValueError:
-        # int() raises ValueError if the param is non-numeric (e.g. ?limit=abc)
         limit = 20
 
     with _buffer_lock:
         recent = list(_event_buffer[-limit:])
 
-    # Build a simple summary for the dashboard
     summary = {}
     for e in recent:
         et = e.get("event_type", "unknown")
@@ -218,11 +253,19 @@ def get_events():
     return jsonify({"events": recent, "summary": summary, "total": len(recent)}), 200
 
 
+@app.route("/api/analytics", methods=["GET"])
+def get_analytics():
+    """Return Stream Analytics results to the dashboard."""
+    with _analytics_lock:
+        data = {
+            "device_breakdown": dict(_analytics_buffer["device_breakdown"]),
+            "spike_detection":  dict(_analytics_buffer["spike_detection"])
+        }
+    return jsonify(data), 200
+
+
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point (local development only — Gunicorn uses start_consumer above)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Start the background consumer so the dashboard receives live events
-    start_consumer()
-    # Run on 0.0.0.0 so it is reachable both locally and inside Azure App Service
     app.run(debug=False, host="0.0.0.0", port=8000)
