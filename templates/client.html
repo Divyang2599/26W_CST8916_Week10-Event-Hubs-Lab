@@ -117,6 +117,7 @@
     #event-log .log-line span.ts  { color: #888; }
     #event-log .log-line span.evt { color: #ffd166; }
     #event-log .log-line span.ok  { color: #06d6a0; }
+    #event-log .log-line span.err { color: #f85149; }
 
     /* ── Dashboard link ─────────────────────────────────────── */
     .dashboard-link {
@@ -175,18 +176,53 @@
 <script>
   // ── Product catalogue ──────────────────────────────────────────
   const PRODUCTS = [
-    { id: "p_shoe_01",   name: "Trail Runners",    price: 89.99,  emoji: "👟", page: "/products/shoes" },
-    { id: "p_laptop_02", name: "UltraBook Pro",    price: 999.00, emoji: "💻", page: "/products/laptops" },
-    { id: "p_watch_03",  name: "SmartWatch X",     price: 249.99, emoji: "⌚", page: "/products/watches" },
-    { id: "p_camera_04", name: "Pocket Camera",    price: 349.50, emoji: "📷", page: "/products/cameras" },
-    { id: "p_headph_05", name: "NoiseFree Buds",   price: 129.00, emoji: "🎧", page: "/products/audio" },
-    { id: "p_tshirt_06", name: "Classic Tee",      price: 29.99,  emoji: "👕", page: "/products/apparel" },
+    { id: "p_shoe_01",   name: "Trail Runners",  price: 89.99,  emoji: "👟", page: "/products/shoes"   },
+    { id: "p_laptop_02", name: "UltraBook Pro",  price: 999.00, emoji: "💻", page: "/products/laptops" },
+    { id: "p_watch_03",  name: "SmartWatch X",   price: 249.99, emoji: "⌚", page: "/products/watches" },
+    { id: "p_camera_04", name: "Pocket Camera",  price: 349.50, emoji: "📷", page: "/products/cameras" },
+    { id: "p_headph_05", name: "NoiseFree Buds", price: 129.00, emoji: "🎧", page: "/products/audio"   },
+    { id: "p_tshirt_06", name: "Classic Tee",    price: 29.99,  emoji: "👕", page: "/products/apparel" },
   ];
 
-  // Simulated session ID – changes on every page load
+  // ── Session & User IDs ─────────────────────────────────────────
+  // These are simulated — in a real app they come from authentication
   const SESSION_ID = "s_" + Math.random().toString(36).slice(2, 8);
-  // Simulated user ID – in a real app this comes from auth
-  const USER_ID = "u_" + Math.random().toString(36).slice(2, 6);
+  const USER_ID    = "u_" + Math.random().toString(36).slice(2, 6);
+
+  // ── Device / Browser / OS detection ───────────────────────────
+  // We read navigator.userAgent to detect what the user is running.
+  // This enriches every event with deviceType, browser, and os fields
+  // so Azure Stream Analytics can answer "which devices are most active?"
+  function getDeviceInfo() {
+    const ua = navigator.userAgent;
+
+    // Device type detection
+    let deviceType = "desktop";
+    if (/Mobi|Android|iPhone|iPad|iPod/i.test(ua)) {
+      deviceType = /iPad/i.test(ua) ? "tablet" : "mobile";
+    }
+
+    // Browser detection — order matters (Edge & Opera include "Chrome" in UA)
+    let browser = "Other";
+    if      (/Edg\//.test(ua))                                browser = "Edge";
+    else if (/OPR\//.test(ua))                                browser = "Opera";
+    else if (/Chrome\//.test(ua))                             browser = "Chrome";
+    else if (/Firefox\//.test(ua))                            browser = "Firefox";
+    else if (/Safari\//.test(ua) && !/Chrome\//.test(ua))    browser = "Safari";
+
+    // OS detection
+    let os = "Other";
+    if      (/Windows/.test(ua))              os = "Windows";
+    else if (/Android/.test(ua))              os = "Android";
+    else if (/iPhone|iPad|iPod/.test(ua))     os = "iOS";
+    else if (/Mac OS X/.test(ua))             os = "macOS";
+    else if (/Linux/.test(ua))                os = "Linux";
+
+    return { deviceType, browser, os };
+  }
+
+  // Capture device info once on page load — same for all events this session
+  const DEVICE_INFO = getDeviceInfo();
 
   // ── Render product cards ───────────────────────────────────────
   const grid = document.getElementById("product-grid");
@@ -199,7 +235,7 @@
       <div class="price">$${product.price.toFixed(2)}</div>
       <button onclick="addToCart('${product.id}', '${product.page}')">Add to Cart</button>
     `;
-    // Clicking the card body (not the button) = product_click event
+    // Clicking the card body (not the button) fires a product_click event
     card.addEventListener("click", (e) => {
       if (e.target.tagName !== "BUTTON") {
         trackEvent("product_click", product.page, product.id);
@@ -222,8 +258,9 @@
   }
 
   // ── Core tracking function ─────────────────────────────────────
-  // Sends a POST request to /track with the event details.
-  // The Flask backend publishes this to Azure Event Hubs.
+  // Builds the enriched event payload and sends it to Flask /track.
+  // Flask then publishes it to Azure Event Hubs.
+  // AI Disclosure: structure assisted by Claude (Anthropic)
   function trackEvent(eventType, page, productId) {
     const payload = {
       event_type: eventType,
@@ -231,23 +268,30 @@
       product_id: productId,
       user_id:    USER_ID,
       session_id: SESSION_ID,
+      deviceType: DEVICE_INFO.deviceType,   // e.g. "desktop", "mobile", "tablet"
+      browser:    DEVICE_INFO.browser,      // e.g. "Chrome", "Firefox", "Safari"
+      os:         DEVICE_INFO.os,           // e.g. "Windows", "macOS", "Linux"
     };
 
-    // Send the event to the Flask /track endpoint
+    // POST to Flask — Flask enriches with timestamp and sends to Event Hubs
     fetch("/track", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(payload),
     })
     .then(res => res.json())
-    .then(data => logEvent(payload, true))
-    .catch(err => logEvent(payload, false));
+    .then(() => logEvent(payload, true))
+    .catch(() => logEvent(payload, false));
   }
 
   // ── Append a line to the on-page event log ─────────────────────
   function logEvent(payload, success) {
     const log  = document.getElementById("event-log");
     const time = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+
+    // Remove "Waiting..." placeholder on first real event
+    if (log.querySelector("span[style]")) log.innerHTML = "";
+
     const line = document.createElement("div");
     line.className = "log-line";
     line.innerHTML =
@@ -255,9 +299,9 @@
       `<span class="evt">${payload.event_type}</span> ` +
       `${payload.page || ""}` +
       (payload.product_id ? ` (${payload.product_id})` : "") +
+      ` [${payload.deviceType}/${payload.browser}/${payload.os}]` +
       ` <span class="${success ? "ok" : "err"}">${success ? "→ sent to Event Hubs" : "× send failed"}</span>`;
-    // Remove placeholder text on first real event
-    if (log.querySelector("span[style]")) log.innerHTML = "";
+
     log.appendChild(line);
     log.scrollTop = log.scrollHeight;
   }
