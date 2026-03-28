@@ -40,7 +40,7 @@ flowchart TD
 
 **Problem:** The original event had no `deviceType`, `browser`, or `os` field. Stream Analytics could not answer *"which devices are most active?"* without this data.
 
-**Decision:** I detected device info **client-side in JavaScript** using `navigator.userAgent`. The browser already knows what device it is running on — reading it in JavaScript means zero server cost, zero latency, and no third-party service needed.
+**Decision:** I detected device info **client-side in JavaScript** using `navigator.userAgent`. The browser already knows what device it is running on. Reading it in JavaScript means zero server cost, zero latency, and no third-party service needed.
 
 Every event now carries these extra fields:
 ```json
@@ -68,7 +68,7 @@ I chose a second Event Hub over Blob Storage or Azure SQL because:
 
 ### Stream Analytics Query Design
 
-I used **TumblingWindow(second, 30)** — a fixed 30-second non-overlapping window. Every 30 seconds it outputs fresh results and starts over. This is the right choice for a marketing dashboard where near-real-time updates every 30 seconds are perfectly acceptable.
+I used **TumblingWindow(second, 30)**, a fixed 30-second non-overlapping window. Every 30 seconds it outputs fresh results and starts over. This is the right choice for a marketing dashboard where near-real-time updates every 30 seconds are perfectly acceptable.
 
 **Query 1 — Device Breakdown** answers *"Which device types are most active?"*
 
