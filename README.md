@@ -36,7 +36,7 @@ flowchart TD
 
 ## Design Decisions
 
-### How I enriched the events — Part 1
+### How I enriched the events - Part 1
 
 **Problem:** The original event had no `deviceType`, `browser`, or `os` field. Stream Analytics could not answer *"which devices are most active?"* without this data.
 
