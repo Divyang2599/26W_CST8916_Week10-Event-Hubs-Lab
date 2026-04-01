@@ -1,8 +1,7 @@
 # CST8916 – Assignment 2: Real-time Stream Analytics Pipeline
 
 **Course:** CST8916 – Remote Data and Real-time Applications  
-**Student:** Divyang  
-**Due Date:** March 30, 2026  
+**Student:** Divyang  Lodariya
 **YouTube Demo:** [https://youtu.be/O1qZcTUYE_0?si=pEBh4aHz5X3YiER-]
 
 ---
