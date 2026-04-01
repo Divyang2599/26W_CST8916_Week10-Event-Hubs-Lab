@@ -70,7 +70,7 @@ I chose a second Event Hub over Blob Storage or Azure SQL because:
 
 I used **TumblingWindow(second, 30)**, a fixed 30-second non-overlapping window. Every 30 seconds it outputs fresh results and starts over. This is the right choice for a marketing dashboard where near-real-time updates every 30 seconds are perfectly acceptable.
 
-**Query 1 — Device Breakdown** answers *"Which device types are most active?"*
+**Query 1 - Device Breakdown** answers *"Which device types are most active?"*
 
 ```sql
 SELECT
@@ -83,7 +83,7 @@ FROM [clickstream-input] TIMESTAMP BY EventEnqueuedUtcTime
 GROUP BY deviceType, TumblingWindow(second, 30)
 ```
 
-**Query 2 — Spike Detection** answers *"Are there traffic spikes?"*
+**Query 2 - Spike Detection** answers *"Are there traffic spikes?"*
 
 ```sql
 SELECT
@@ -111,14 +111,14 @@ I used `TIMESTAMP BY EventEnqueuedUtcTime` so Stream Analytics uses the Event Hu
 | Resource | Name |
 |----------|------|
 | Event Hubs Namespace | `shopstream-divyang` |
-| Event Hub | `clickstream` — 2 partitions, 1 day retention |
-| Event Hub | `analytics-output` — 2 partitions, 1 day retention |
-| Stream Analytics Job | `shopstream-analytics` — status: Running |
-| App Service | `shopstream-divyang` — Python 3.11, Linux, Free F1 |
+| Event Hub | `clickstream` - 2 partitions, 1 day retention |
+| Event Hub | `analytics-output` - 2 partitions, 1 day retention |
+| Stream Analytics Job | `shopstream-analytics` - status: Running |
+| App Service | `shopstream-divyang` - Python 3.11, Linux, Free F1 |
 
 ### Environment Variables
 
-Set these before running — never put secrets in code:
+Set these before running - never put secrets in code:
 
 | Variable | Value |
 |----------|-------|
@@ -147,7 +147,7 @@ Open `http://localhost:8000/dashboard` for the live dashboard
 ### Deploy to Azure
 
 The app deploys automatically via **GitHub Actions CI/CD**.  
-Every push to `main` triggers a rebuild and redeploy — no manual steps needed.
+Every push to `main` triggers a rebuild and redeploy - no manual steps needed.
 
 Startup command on App Service:
 ```
